@@ -2,6 +2,7 @@
 #include <FreeRTOS.h>
 #include <task.h>
 #include <queue.h>
+#include "semphr.h"
 //Standard includes
 #include <stdio.h>
 #include <stdint.h>
@@ -9,7 +10,7 @@
 #include <pico/stdlib.h>
 #include "pico/binary_info.h"
 #include "pico/cyw43_arch.h"
-#include "lwip/tcpip.h"
+#include "lwip/dns.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/err.h"
 //Peripherals includes
@@ -27,75 +28,163 @@ static QueueHandle_t xQueuePress= NULL;
 
 const uint8_t num_chars_per_disp[]={7,7,7,5};
 
-const char *ChannelID= "2769474";
-#define MQTT_BROKER_IP "184.106.153.149"
-#define MQTT_BROKER_PORT 1883
-#define TS_API_KEY "3UAEI0AXFKA2PL3O"
-#define TOPIC_TEMPERATURE "channels/2769474/publish/fields/1"
-#define TOPIC_PRESSURE "channels/2769474/publish/fields/2"
+const char *ChannelID="2769474";
+#define MQTT_SERVER_HOST "mqtt3.thingspeak.com"
+#define MQTT_SERVER_PORT 1883
+#define MQTT_CLIENT_ID "CDY0IjMeGCgiNz0aOiMQDSU"
+#define MQTT_USERNAME "CDY0IjMeGCgiNz0aOiMQDSU"
+#define MQTT_PASSWORD "tQM4LoDla8sePSQudlIe/wkl"
 
-static void publish_to_topic(mqtt_client_t *client, const char *topic, float value) {
-    char payload[64];
-    snprintf(payload, sizeof(payload), "%.2f", value);
 
-    err_t err = mqtt_publish(client, topic, payload, strlen(payload), 0, 0, NULL, NULL);
+typedef struct MQTT_CLIENT_T_ {
+  ip_addr_t remote_addr;
+  mqtt_client_t *mqtt_client;
+  u32_t received;
+  u32_t counter;
+  u32_t reconnect;
+} MQTT_CLIENT_T;
+
+static MQTT_CLIENT_T* mqtt_client_init(void) {
+  MQTT_CLIENT_T *stateM = (MQTT_CLIENT_T *)calloc(1, sizeof(MQTT_CLIENT_T));    
+  if (!stateM) {
+    printf("-failed to allocate state\n");
+    return NULL;
+  }
+  stateM->received = 0;
+  return stateM;
+}
+
+MQTT_CLIENT_T *stateM;
+SemaphoreHandle_t mqttSemaphore;
+
+void dns_found(const char *name, const ip_addr_t *ipaddr, void *callback_arg) {
+    MQTT_CLIENT_T *stateM = (MQTT_CLIENT_T *)callback_arg;
+    printf("-MQTT DNS addr: %s.\n", ip4addr_ntoa(ipaddr));
+    stateM->remote_addr = *ipaddr;
+    xSemaphoreGive(mqttSemaphore);  // Liberar semáforo
+}
+
+void run_dns_lookup(void *pvParameters) {
+    printf("\n-Running mqtt DNS query for %s.\n", MQTT_SERVER_HOST);
+
+    cyw43_arch_lwip_begin();
+    err_t err = dns_gethostbyname(MQTT_SERVER_HOST, &(stateM->remote_addr), dns_found, stateM);
+    cyw43_arch_lwip_end();
+
     if (err == ERR_OK) {
-        printf("Dato enviado al tópico %s: %s\n", topic, payload);
-    } else {
-        printf("Error enviando dato al tópico %s: %d\n", topic, err);
+        printf("-No DNS lookup needed.\n");
+        xSemaphoreGive(mqttSemaphore);  // Liberar semáforo si ya está resuelto
+    } else if (err == ERR_ARG) {
+        printf("-Failed to start MQTT DNS query\n");
     }
+
+    // Liberar el control de la tarea
+    vTaskDelete(NULL);
 }
 
-static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status) {
-    if (status == MQTT_CONNECT_ACCEPTED) {
-        printf("Conectado a ThingSpeak MQTT\n");
-    } else {
-        printf("Error de conexión MQTT: %d\n", status);
-    }
-}
-
-void mqttsend_task() {
-    mqtt_client_t *client = mqtt_client_new();
-    if (client == NULL) {
-        printf("Failed to create MQTT client\n");
-        return;
-    }
-    struct mqtt_connect_client_info_t ci = {
-        .client_id = "DzcaDRwSPSgBOQ4YOTomNRE",
-        .client_user = NULL,
-        .client_pass = NULL,
-        .keep_alive = 60,
-    };
-
-    ip_addr_t broker_ip;
-    ipaddr_aton(MQTT_BROKER_IP, &broker_ip);
-
-    err_t err = mqtt_client_connect(client, &broker_ip, MQTT_BROKER_PORT, mqtt_connection_cb, NULL, &ci);
+void mqtt_pub_request_cb(void *arg, err_t err) {
     if (err != ERR_OK) {
-        printf("Error connecting to MQTT broker: %d\n", err);
-        return;
+        printf("-Publish failed with error: %d\n", err);
+    } else {
+        printf("-Publish successful.\n");
     }
-        
-    while (true) {
-        // Lee los datos del BMP280
-        int32_t receivedTemp;
-        int32_t receivedPress;
-        xQueueReceive(xQueueTemp, &receivedTemp, portMAX_DELAY);
-        xQueueReceive(xQueuePress, &receivedPress, portMAX_DELAY);
-        float temp=receivedTemp/100.f;
-        float press=receivedPress/1000.f;
-    
-        // Publica los datos en los tópicos correspondientes
-        publish_to_topic(client, TOPIC_TEMPERATURE, temp);
-        publish_to_topic(client, TOPIC_PRESSURE, press);
+}
+void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status) {
+    MQTT_CLIENT_T *stateM = (MQTT_CLIENT_T *)arg;
 
-        vTaskDelay(pdMS_TO_TICKS(15000)); // ThingSpeak permite una publicación cada 15 segundos
+    if (status == MQTT_CONNECT_ACCEPTED) {
+        printf("MQTT connected successfully.\n");
+    } else {
+        printf("MQTT connection failed with status: %d\n", status);
+        stateM->reconnect++;
     }
 }
 /*En FreeRTOS se utilizan "tareas" que son rutinas declaradas como void que no 
 retornan ningun valor. Cada una de estas rutinas envia o recibe datos a traves
 de una cola o "Queue". 
 */
+
+
+void mqtt_task(void *pvParameters) {
+    static const struct mqtt_connect_client_info_t mqtt_client_info = {
+        .client_id = MQTT_CLIENT_ID,
+        .client_user = MQTT_USERNAME,
+        .client_pass = MQTT_PASSWORD,
+        .keep_alive = 60,
+        .will_topic = NULL,
+    };
+
+    if (!stateM->mqtt_client) {
+        stateM->mqtt_client = mqtt_client_new();
+        if (!stateM->mqtt_client) {
+            printf("Failed to create MQTT client.\n");
+            return;
+        }
+    }
+
+    while (1) {
+        int32_t receivedTemp;
+        int32_t receivedPress;
+
+        xQueueReceive(xQueueTemp, &receivedTemp, portMAX_DELAY);
+        float temperature = receivedTemp / 100.f;
+
+        xQueueReceive(xQueuePress, &receivedPress, portMAX_DELAY);
+        float pressure = receivedPress / 1000.f;
+
+        if (!mqtt_client_is_connected(stateM->mqtt_client)) {
+            err_t err = mqtt_client_connect(
+                stateM->mqtt_client,
+                &stateM->remote_addr,
+                MQTT_SERVER_PORT,
+                mqtt_connection_cb,
+                stateM,
+                &mqtt_client_info
+            );
+
+            if (err != ERR_OK) {
+                printf("MQTT connection failed: %d\n", err);
+                continue;
+            }
+        }
+
+        char temp_buffer[64];
+        snprintf(temp_buffer, sizeof(temp_buffer), "field1=%.2f&api_key=%s", temperature, "3UAEI0AXFKA2PL3O");
+        err_t err = mqtt_publish(
+            stateM->mqtt_client,
+            "channels/2769474/publish",
+            temp_buffer,
+            strlen(temp_buffer),
+            0,
+            0,
+            mqtt_pub_request_cb,
+            stateM
+        );
+
+        if (err != ERR_OK) {
+            printf("Failed to publish temperature: %d\n", err);
+        }
+
+        char pressure_buffer[64];
+        snprintf(pressure_buffer, sizeof(pressure_buffer), "field2=%.2f&api_key=%s", pressure, "3UAEI0AXFKA2PL3O");
+        err = mqtt_publish(
+            stateM->mqtt_client,
+            "channels/2769474/publish",
+            pressure_buffer,
+            strlen(pressure_buffer),
+            0,
+            0,
+            mqtt_pub_request_cb,
+            stateM
+        );
+
+        if (err != ERR_OK) {
+            printf("Failed to publish pressure: %d\n", err);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(15000)); // Publish every 15 seconds
+    }
+}
 
 //Tarea para obtener los valores de temperatura y presion del sensor BMP280
 
@@ -112,7 +201,7 @@ void tempBMP_task(void *pvParameters){
         xQueueSend(xQueueTemp, &temperature, portMAX_DELAY);// Funcion para enviar datos en una cola
         int32_t pressure = bmp280_convert_pressure(raw_pressure, raw_temperature, &params);
         xQueueSend(xQueuePress, &pressure, portMAX_DELAY);
-        vTaskDelay(pdMS_TO_TICKS(7500));
+        vTaskDelay(pdMS_TO_TICKS(1500));
     }
 }
 //Tarea para enviar los datos mediante USB y mostrarlos en un monitor serial
@@ -169,6 +258,7 @@ y vTaskScheduler, ademas de tambien crear las colas o "Queues"
 */
 int main(){
     stdio_init_all();
+    
     #if !defined(i2c_default) || !defined(PICO_DEFAULT_I2C_SDA_PIN) || !defined(PICO_DEFAULT_I2C_SCL_PIN)
     #warning i2c / bmp280_i2c example requires a board with I2C pins
         puts("Default I2C pins were not defined");
@@ -180,6 +270,13 @@ int main(){
         printf("failed to initialise\n");
         return 1;
     }
+        stateM = mqtt_client_init();
+        if (!stateM) {
+            printf("-Failed to initialize MQTT client\n");
+            return -1;
+        }
+
+        
 
         cyw43_arch_enable_sta_mode();
 
@@ -196,13 +293,16 @@ int main(){
         gpio_pull_up(17);
         gpio_pull_up(16);
 
+        mqttSemaphore = xSemaphoreCreateBinary();
         xQueueTemp = xQueueCreate(2,sizeof(int32_t));
         xQueuePress = xQueueCreate(2,sizeof(int32_t));
         //xTaskCreate(mqttconnect_task, "mqttconnect_task",NULL,1,NULL);
+        xTaskCreate(run_dns_lookup, "dnslookup_Task", 1024, NULL, 1, NULL);
+        xTaskCreate(mqtt_task, "mqtt_Task", 2048, NULL, 1, NULL);
         xTaskCreate(tempBMP_task, "tempBMP_Task",256, NULL, 1, NULL);
         xTaskCreate(oled_task, "toled_Task" , 256 , NULL, 1 , NULL);
         xTaskCreate(usb_task, "usb_Task" , 256 , NULL , 1 , NULL);
-        xTaskCreate(mqttsend_task, "mqttsend_Task" , 256 , NULL , 1 , NULL);
+        //xTaskCreate(mqttsend_task, "mqttsend_Task" , 256 , NULL , 1 , NULL);
         vTaskStartScheduler();
 
         while(1){}
