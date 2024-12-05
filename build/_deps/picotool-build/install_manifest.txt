@@ -1,0 +1,5 @@
+/home/santiago/dev/pico/proyecto-final/build/_deps/picotool/picotool
+/home/santiago/dev/pico/proyecto-final/build/_deps/picotool/picotoolTargets.cmake
+/home/santiago/dev/pico/proyecto-final/build/_deps/picotool/picotoolTargets-release.cmake
+/home/santiago/dev/pico/proyecto-final/build/_deps/picotool/picotoolConfig.cmake
+/home/santiago/dev/pico/proyecto-final/build/_deps/picotool/picotoolConfigVersion.cmake
