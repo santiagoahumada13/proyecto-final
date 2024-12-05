@@ -9,6 +9,9 @@
 #include <pico/stdlib.h>
 #include "pico/binary_info.h"
 #include "pico/cyw43_arch.h"
+#include "lwip/tcpip.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/err.h"
 //Peripherals includes
 #include "bmp280_i2c.h"
 #include "ssd1306.h"
@@ -24,8 +27,71 @@ static QueueHandle_t xQueuePress= NULL;
 
 const uint8_t num_chars_per_disp[]={7,7,7,5};
 
-#define SLEEPTIME 25
+const char *ChannelID= "2769474";
+#define MQTT_BROKER_IP "184.106.153.149"
+#define MQTT_BROKER_PORT 1883
+#define TS_API_KEY "3UAEI0AXFKA2PL3O"
+#define TOPIC_TEMPERATURE "channels/2769474/publish/fields/1"
+#define TOPIC_PRESSURE "channels/2769474/publish/fields/2"
 
+static void publish_to_topic(mqtt_client_t *client, const char *topic, float value) {
+    char payload[64];
+    snprintf(payload, sizeof(payload), "%.2f", value);
+
+    err_t err = mqtt_publish(client, topic, payload, strlen(payload), 0, 0, NULL, NULL);
+    if (err == ERR_OK) {
+        printf("Dato enviado al tópico %s: %s\n", topic, payload);
+    } else {
+        printf("Error enviando dato al tópico %s: %d\n", topic, err);
+    }
+}
+
+static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status) {
+    if (status == MQTT_CONNECT_ACCEPTED) {
+        printf("Conectado a ThingSpeak MQTT\n");
+    } else {
+        printf("Error de conexión MQTT: %d\n", status);
+    }
+}
+
+void mqttsend_task() {
+    mqtt_client_t *client = mqtt_client_new();
+    if (client == NULL) {
+        printf("Failed to create MQTT client\n");
+        return;
+    }
+    struct mqtt_connect_client_info_t ci = {
+        .client_id = "DzcaDRwSPSgBOQ4YOTomNRE",
+        .client_user = NULL,
+        .client_pass = NULL,
+        .keep_alive = 60,
+    };
+
+    ip_addr_t broker_ip;
+    ipaddr_aton(MQTT_BROKER_IP, &broker_ip);
+
+    err_t err = mqtt_client_connect(client, &broker_ip, MQTT_BROKER_PORT, mqtt_connection_cb, NULL, &ci);
+    if (err != ERR_OK) {
+        printf("Error connecting to MQTT broker: %d\n", err);
+        return;
+    }
+        
+    while (true) {
+        // Lee los datos del BMP280
+        int32_t receivedTemp;
+        int32_t receivedPress;
+        xQueueReceive(xQueueTemp, &receivedTemp, portMAX_DELAY);
+        xQueueReceive(xQueuePress, &receivedPress, portMAX_DELAY);
+        float temp=receivedTemp/100.f;
+        float press=receivedPress/1000.f;
+    
+        // Publica los datos en los tópicos correspondientes
+        publish_to_topic(client, TOPIC_TEMPERATURE, temp);
+        publish_to_topic(client, TOPIC_PRESSURE, press);
+
+        vTaskDelay(pdMS_TO_TICKS(15000)); // ThingSpeak permite una publicación cada 15 segundos
+    }
+}
 /*En FreeRTOS se utilizan "tareas" que son rutinas declaradas como void que no 
 retornan ningun valor. Cada una de estas rutinas envia o recibe datos a traves
 de una cola o "Queue". 
@@ -66,7 +132,7 @@ void oled_task(void *pvParameters){
 
     int32_t receivedTemp;
     int32_t receivedPress;
-
+    
     while(1){
         xQueueReceive(xQueueTemp, &receivedTemp, portMAX_DELAY);
         float temp=receivedTemp/100.f;
@@ -74,8 +140,8 @@ void oled_task(void *pvParameters){
         float press=receivedPress/1000.f;
         char tcon[20];
         char pcon[20];
-        sprintf(tcon,"%.0f",temp);
-        sprintf(pcon,"%.0f",press);
+        sprintf(tcon,"%.0f C",temp);
+        sprintf(pcon,"%.0fkPa",press);
         char *meas[]={tcon,pcon};
         ssd1306_t disp;
         disp.external_vcc=false;
@@ -83,13 +149,15 @@ void oled_task(void *pvParameters){
         ssd1306_clear(&disp);
         const char *words[]={"Temperatura","Presion"};
         char buf[8];
-        while(1){
+
+        for(;;){
                 for(int i=0; i<sizeof(meas)/sizeof(char *); ++i) {
                     ssd1306_draw_string(&disp, 8, 8, 3/2, words[i]);
-                    ssd1306_draw_string(&disp, 70, 32, 4, meas[i]);
+                    ssd1306_draw_string(&disp, 8, 32, 4, meas[i]);
                     ssd1306_show(&disp);
-                    sleep_ms(1000);
                     ssd1306_clear(&disp);
+                    sleep_ms(1000);
+                    
                 }
             }
     }
@@ -130,9 +198,11 @@ int main(){
 
         xQueueTemp = xQueueCreate(2,sizeof(int32_t));
         xQueuePress = xQueueCreate(2,sizeof(int32_t));
+        //xTaskCreate(mqttconnect_task, "mqttconnect_task",NULL,1,NULL);
         xTaskCreate(tempBMP_task, "tempBMP_Task",256, NULL, 1, NULL);
         xTaskCreate(oled_task, "toled_Task" , 256 , NULL, 1 , NULL);
         xTaskCreate(usb_task, "usb_Task" , 256 , NULL , 1 , NULL);
+        xTaskCreate(mqttsend_task, "mqttsend_Task" , 256 , NULL , 1 , NULL);
         vTaskStartScheduler();
 
         while(1){}
