@@ -1,5 +1,0 @@
-/home/santiago/dev/pico/proyecto-final/build/pioasm-install/pioasm/pioasm
-/home/santiago/dev/pico/proyecto-final/build/pioasm-install/pioasm/pioasmTargets.cmake
-/home/santiago/dev/pico/proyecto-final/build/pioasm-install/pioasm/pioasmTargets-release.cmake
-/home/santiago/dev/pico/proyecto-final/build/pioasm-install/pioasm/pioasmConfig.cmake
-/home/santiago/dev/pico/proyecto-final/build/pioasm-install/pioasm/pioasmConfigVersion.cmake

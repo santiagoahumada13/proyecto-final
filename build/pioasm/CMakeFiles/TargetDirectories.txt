@@ -1,7 +1,0 @@
-/home/santiago/dev/pico/proyecto-final/build/pioasm/CMakeFiles/pioasm.dir
-/home/santiago/dev/pico/proyecto-final/build/pioasm/CMakeFiles/edit_cache.dir
-/home/santiago/dev/pico/proyecto-final/build/pioasm/CMakeFiles/rebuild_cache.dir
-/home/santiago/dev/pico/proyecto-final/build/pioasm/CMakeFiles/list_install_components.dir
-/home/santiago/dev/pico/proyecto-final/build/pioasm/CMakeFiles/install.dir
-/home/santiago/dev/pico/proyecto-final/build/pioasm/CMakeFiles/install/local.dir
-/home/santiago/dev/pico/proyecto-final/build/pioasm/CMakeFiles/install/strip.dir
