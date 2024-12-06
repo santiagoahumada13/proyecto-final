@@ -206,6 +206,12 @@ void tempBMP_task(void *pvParameters){
         xQueueSend(xQueuePress, &pressure, portMAX_DELAY);
         xQueueSend(xQueueterminalPress, &pressure, portMAX_DELAY);
         vTaskDelay(pdMS_TO_TICKS(1500));
+        float temp=temperature/100.f;
+        if(temp>=24){
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        }else{
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        }
     }
 }
 //Tarea para enviar los datos mediante USB y mostrarlos en un monitor serial
@@ -255,6 +261,17 @@ void oled_task(void *pvParameters){
             }
     }
 }
+
+void led_task(void *pvParameters){
+    int32_t receivedTemp;
+    xQueueReceive(xQueueTemp, &receivedTemp,portMAX_DELAY);
+    float temp=receivedTemp/100.f;
+
+    while(temp>=24){
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    }
+}
+
 //Main
 /*Al utilizar FreeRTOS el main tiene la funcion principal de: inicializar puertos 
 y crear las tareas para "agendar" su ejecuciones, mediante las funciones xTaskCreate
@@ -305,6 +322,7 @@ int main(){
         xTaskCreate(tempBMP_task, "tempBMP_Task",256, NULL, 1, NULL);
         xTaskCreate(oled_task, "toled_Task" , 256 , NULL, 1 , NULL);
         xTaskCreate(usb_task, "usb_Task" , 256 , NULL , 1 , NULL);
+       // xTaskCreate(led_task, "led_Task" , 256 , NULL , 1 , NULL);
         vTaskStartScheduler();
 
         while(1){}
